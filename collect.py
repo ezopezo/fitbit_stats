@@ -56,25 +56,26 @@ class CollectData:
                     'minutes_asleep',
                     'minutes_awake',
                     'minutes_to_fall_asleep')
-        
 
+    def __init__(self, _file):
+        self._file = _file
+        
 
     def __enter__(self):
         # Using the ID and Secret, we can obtain the access and refresh tokens that authorize us to get our data.
         KEYS = open('keys.txt', 'r').readlines()
         self.CLIENT_ID = KEYS[0].strip('\n')
         self.CLIENT_SECRET = KEYS[1].strip('\n')
-        server = Oauth2.OAuth2Server(self.CLIENT_ID, self.CLIENT_SECRET)
-        server.browser_authorize()
-        print(dir(server))
-        ACCESS_TOKEN = str(server.fitbit.client.session.token['access_token'])
-        REFRESH_TOKEN = str(server.fitbit.client.session.token['refresh_token'])
+        self.server = Oauth2.OAuth2Server(self.CLIENT_ID, self.CLIENT_SECRET)
+        self.server.browser_authorize()
+        ACCESS_TOKEN = str(self.server.fitbit.client.session.token['access_token'])
+        REFRESH_TOKEN = str(self.server.fitbit.client.session.token['refresh_token'])
         self.auth2_client = fitbit.Fitbit(self.CLIENT_ID, self.CLIENT_SECRET, oauth2=True, access_token=ACCESS_TOKEN, refresh_token=REFRESH_TOKEN) #TODO token dict
         self.auth2_client.API_VERSION = 1.2
         return self
 
+
     def __exit__(self, ex_type, ex_value, ex_traceback):
-        self.auth2_client.close()
         print(ex_type, ex_value, ex_traceback)
         return False
         
@@ -104,31 +105,34 @@ class CollectData:
             print('Requests continue...')
 
 
-    def check_last_date_in_collected_data(self):
-        with open("fitbit_stats.csv", "r") as file:
-            try:
-                for last_line in file:
-                    pass
-                return datetime.datetime.strptime(last_line.split(',')[0], '%d.%m.%Y')
-            except Exception as ex:
-                print(ex)
+    #### Checking files ####
+    def check_last_date_in_collected_data(self, file):
+        with open(file, "r") as file:
+            for last_line in file:
+                pass
+            return datetime.datetime.strptime(last_line.split(',')[0], '%d.%m.%Y')
 
 
-    def check_most_recent_date_in_collected_data(self):
-        with open("fitbit_stats.csv", "r") as file:
-            try:
-                next(file) # header
-                return datetime.datetime.strptime(next(file).split(',')[0], '%d.%m.%Y')
-            except Exception as ex:
-                print(ex)
-        
+    def check_most_recent_date_in_collected_data(self, file):
+        with open(file, "r") as file:
+            next(file) # header
+            return datetime.datetime.strptime(next(file).split(',')[0], '%d.%m.%Y')
+
+    
+    def read_date_to_past(self):
+        if not os.path.isfile('date_to_past.txt'):
+            self.request_date_to_past_for_collecting_data()
+        date_to_past = open('date_to_past.txt', 'r').readline()
+        return datetime.datetime.strptime(date_to_past, '%Y/%m/%d')
+    ##########################
+
 
     def request_date_to_past_for_collecting_data(self):
         start_date = input('Date to past, you want collect data (format year month day): ')
         while True:
             try:
                 formated_start_date = datetime.datetime(*tuple([int(num) for num in start_date.split(' ')]))
-                with open('temp.txt', 'w') as w_start_date:
+                with open('date_to_past.txt', 'w') as w_start_date:
                     w_start_date.write(formated_start_date.strftime('%Y/%m/%d'))
                     #w_start_date.write('\nDo not delete this file while collecting data! Date may be edited but be aware of correct format.')
                 break
@@ -138,52 +142,113 @@ class CollectData:
                 break
 
 
-    def collection_control_node(self):
+    def fill_temporary_csv(self):
+        if not os.path.isfile('fitbit_data_temp.csv'):
+            self.write_data_to_csv('fitbit_data_temp.csv', 'w', header=True)
+        else:
+            most_recent_date = self.check_most_recent_date_in_collected_data(self._file)
+            last_collected_date = self.check_last_date_in_collected_data('fitbit_data_temp.csv')
+            self.intraday_dates_range = self.intraday_dates(most_recent_date, 
+                                                            last_collected_date)[1:-1]
+            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, 
+                                                                                last_collected_date)[1:-1]
+            self.write_data_to_csv('fitbit_data_temp.csv', 'a', header=False)
+
+
+    def merge_files(self):
+        # check if last date in temp_file is one day bigger than first date in self._file
+        print('merging')
+        recent_date = self.check_most_recent_date_in_collected_data(self._file)
+        last_tmp_date = self.check_last_date_in_collected_data('fitbit_data_temp.csv')
+        recent_date = recent_date + datetime.timedelta(days=1)
+        print(recent_date, last_tmp_date)
+        # create new csv file (updated_file) with underscore difference from self._file
+        updated_file = str(self._file).replace('.', '_.')
+        if recent_date == last_tmp_date:
+            print('________________')
+            with open(updated_file, 'w') as all_data_file:
+                # fill data from temp_file to updated_file
+                with open('fitbit_data_temp.csv', 'r') as new_data:
+                    for line in new_data:
+                        all_data_file.write(line)
+                
+                # fill data from self._file to updated_file
+                with open(self._file, 'r') as old_data:
+                    for line in old_data:
+                        if not line[:4] == 'date':
+                            all_data_file.write(line)
+                # remove self._file
+                os.remove(self._file)
+                # rename updated_file to self._file
+            os.rename(updated_file, self._file)
+            print('__________________')
+            exit()
+        else:
+            print('Temp file needs update... After updating finishes restart script please.')
+            self.fill_temporary_csv()
+
+
+    def delete_temporary_file(self):
+        if os.path.isfile('fitbit_data_temp.csv'):
+            print('Deleting temporary file...')
+            #os.remove('fitbit_data_temp.csv')
+
+    
+    def control_data_collection_to_past(self, formated_date_to_past, last_collected_date):
+        if formated_date_to_past < last_collected_date:
+            print('Continuing collecting data...')
+            # timerange
+            self.intraday_dates_range = self.intraday_dates(formated_date_to_past, 
+                                                            last_collected_date)[1:]
+            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(formated_date_to_past, 
+                                                                                last_collected_date)[1:]
+            print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
+            self.write_data_to_csv(self._file, 'a', header=False)
+        elif formated_date_to_past == last_collected_date:
+            print('Data are completely collected to specified date. Checking updating data...')
+        else:
+            print('Error last date in collected data is older than specified date. Change date in date_to_past.txt')
+
+
+    def control_data_updating(self, most_recent_date):
         yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
-        if not os.path.isfile('temp.txt'):
-            self.request_date_to_past_for_collecting_data()
-        else: 
-            date_to_past = open('temp.txt', 'r').readline()
-            formated_date_to_past = datetime.datetime.strptime(date_to_past, '%Y/%m/%d')
-            print('Collecting data to date to past specified: ', str(date_to_past))
-            if not os.path.isfile('fitbit_stats___.csv'):
-                start_data_mining = input('Do you want to start collecting data? [y/n] ')
-                if start_data_mining == 'y':
-                    # start collecting - appending
-                    last_collected_date = self.check_last_date_in_collected_data()
-                    print(formated_date_to_past, last_collected_date)
-                    if formated_date_to_past < last_collected_date:
-                        print('Continuing collecting data...')
-                        # timerange
-                        self.intraday_dates_range = self.intraday_dates(formated_date_to_past, 
-                                                                        last_collected_date)
-                        self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(formated_date_to_past, 
-                                                                                            last_collected_date)
-                        #print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
-                        self.write_data_to_csv('fitbit_stats_2.csv', 'a')
-                    elif formated_date_to_past == last_collected_date:
-                        print('Data are completely collected to specified date. Checking updating data...')
-                    else:
-                        print('Error last date in collected data is older than specified date. Cahnge date in temp.txt')
+        if most_recent_date < yesterday:
+            print('Updating data. Last collected date: ', most_recent_date)
+            self.intraday_dates_range = self.intraday_dates(most_recent_date, 
+                                                                yesterday)[:-1]
+            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, 
+                                                                                yesterday)[:-1]
+
+            #print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
+            self.fill_temporary_csv()
+            self.merge_files()
+            self.delete_temporary_file()
+            # create temporary csv, fill data, merge files (lazily), delete temporary file
+        elif most_recent_date == yesterday:
+            print('Data are updated to latest (yesterday). Use process.py for visualization.')
+        else:
+            print("Error, most recent date in csv doesn't make sense.")
 
 
-                    # inserting (or updating)
-                    most_recent_date = self.check_most_recent_date_in_collected_data()
-                    if most_recent_date < yesterday:
-                        print('Updating data. Last collected date: ', most_recent_date)
-                        self.intraday_dates_range = self.intraday_dates(most_recent_date, 
-                                                                            yesterday)[:-1]
-                        self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, 
-                                                                                            yesterday)[:-1]
+    def collection_control_node(self):
+        formated_date_to_past = self.read_date_to_past()
+        print('Collecting data to date to past specified: ', str(formated_date_to_past))
+        if not os.path.isfile(self._file):
+            print('Creating data collection csv file named ', self._file)
+            f = open(self._file, mode='w') # just create it
+            f.close()
 
-                        #print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
-                        # create temporary csv, fill data, merge files (lazily), delete temporary file
-                    elif most_recent_date == yesterday:
-                        print('Data are updated to latest (yesterday). Use process.py for visualization.')
-                    else:
-                        print("Error, most recent date in csv doesn't make sense.")
-                else:
-                    exit()
+        start_data_mining = input('Do you want to start collecting data? [y/n] ')
+        if start_data_mining == 'y':
+            # start collecting - appending
+            last_collected_date = self.check_last_date_in_collected_data(self._file)
+            self.control_data_collection_to_past(formated_date_to_past, last_collected_date)
+            # inserting (or updating)
+            most_recent_date = self.check_most_recent_date_in_collected_data(self._file)
+            self.control_data_updating(most_recent_date)
+        else:
+            exit()
+
 
 
 
@@ -457,10 +522,11 @@ class CollectData:
                     minutes_to_fall_asleep)
 
 
-    def write_data_to_csv(self, file='fitbit_stats_test.csv', mode='a'):
+    def write_data_to_csv(self, file, mode='a', header=False):
         with open(file, mode, newline='') as csvfile:
             write = csv.writer(csvfile, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-            write.writerow(self.header + self.sleep_header)
+            if header:
+                write.writerow(self.header + self.sleep_header)
             for activity_data, sleep_data in zip(self.activity_stats(), self.sleep_stats()):
                 print(activity_data)
                 print(sleep_data)
@@ -474,6 +540,7 @@ class CollectData:
 
 
 if __name__ == '__main__':
-    with CollectData() as col:
-        col.collection_control_node()
+    with CollectData('fitbit_stats_5.csv') as col:
+       col.collection_control_node()
+
     
