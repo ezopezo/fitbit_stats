@@ -70,7 +70,11 @@ class CollectData:
         self.server.browser_authorize()
         ACCESS_TOKEN = str(self.server.fitbit.client.session.token['access_token'])
         REFRESH_TOKEN = str(self.server.fitbit.client.session.token['refresh_token'])
-        self.auth2_client = fitbit.Fitbit(self.CLIENT_ID, self.CLIENT_SECRET, oauth2=True, access_token=ACCESS_TOKEN, refresh_token=REFRESH_TOKEN) #TODO token dict
+        self.auth2_client = fitbit.Fitbit(self.CLIENT_ID, 
+                                        self.CLIENT_SECRET, 
+                                        oauth2=True, 
+                                        access_token=ACCESS_TOKEN, 
+                                        refresh_token=REFRESH_TOKEN) #TODO token dict
         self.auth2_client.API_VERSION = 1.2
         return self
 
@@ -80,16 +84,16 @@ class CollectData:
         return False
         
 
-    def intraday_dates(self, formated_date_to_past, last_collected_date):
+    def intraday_dates(self, formated_base_date, last_collected_date):
         '''Produce strings of dates sequence.'''
         return [timestamp.to_pydatetime().strftime('%Y-%m-%d')
-                for timestamp in reversed(pd.date_range(formated_date_to_past, last_collected_date).tolist())]
+                for timestamp in reversed(pd.date_range(formated_base_date, last_collected_date).tolist())]
     
 
-    def sleep_and_activity_dates(self, formated_date_to_past, last_collected_date):
+    def sleep_and_activity_dates(self, formated_base_date, last_collected_date):
         '''Produce sequence of date objects.'''
         return [timestamp.to_pydatetime()
-                for timestamp in reversed(pd.date_range(formated_date_to_past, last_collected_date).tolist())]
+                for timestamp in reversed(pd.date_range(formated_base_date, last_collected_date).tolist())]
 
 
     @classmethod
@@ -105,34 +109,58 @@ class CollectData:
             print('Requests continue...')
 
 
-    #### Checking files ####
+    #### Checking file dates ####
     def check_last_date_in_collected_data(self, file):
+        yesterday = datetime.datetime.now().date() - datetime.timedelta(days=1)
+        with open(file, "r") as file:
+            try:
+                for last_line in file:
+                    pass
+                return datetime.datetime.strptime(last_line.split(',')[0], '%d.%m.%Y').date()
+            except UnboundLocalError: # empty file on the begining
+                return yesterday
+            except ValueError:
+                return yesterday
+
+
+    def check_if_only_header_in_file(self, file):
         with open(file, "r") as file:
             for last_line in file:
                 pass
-            return datetime.datetime.strptime(last_line.split(',')[0], '%d.%m.%Y')
+            if last_line[:4] == 'date':
+                return True
+            return False
 
 
     def check_most_recent_date_in_collected_data(self, file):
+        yesterday = datetime.datetime.now().date() - datetime.timedelta(days=1)
         with open(file, "r") as file:
-            next(file) # header
-            return datetime.datetime.strptime(next(file).split(',')[0], '%d.%m.%Y')
-
+            try:
+                next(file) # header
+                return datetime.datetime.strptime(next(file).split(',')[0], '%d.%m.%Y').date()
+            except ValueError:
+                return self.read_base_date()
+            except StopIteration: # only header
+                return self.read_base_date()
     
-    def read_date_to_past(self):
-        if not os.path.isfile('date_to_past.txt'):
-            self.request_date_to_past_for_collecting_data()
-        date_to_past = open('date_to_past.txt', 'r').readline()
-        return datetime.datetime.strptime(date_to_past, '%Y/%m/%d')
-    ##########################
+
+    def read_base_date(self):
+        if not os.path.isfile('base_date.txt'):
+            self.request_base_date_for_collecting_data()
+        base_date = open('base_date.txt', 'r').readline()
+        try:
+            return datetime.datetime.strptime(base_date, '%Y/%m/%d').date()
+        except ValueError:
+            print('Date in __base_date.txt__ is not valid. Check proper format Y/m/d in file.')
+    ##############################
 
 
-    def request_date_to_past_for_collecting_data(self):
+    def request_base_date_for_collecting_data(self):
         start_date = input('Date to past, you want collect data (format year month day): ')
         while True:
             try:
                 formated_start_date = datetime.datetime(*tuple([int(num) for num in start_date.split(' ')]))
-                with open('date_to_past.txt', 'w') as w_start_date:
+                with open('base_date.txt', 'w') as w_start_date:
                     w_start_date.write(formated_start_date.strftime('%Y/%m/%d'))
                     #w_start_date.write('\nDo not delete this file while collecting data! Date may be edited but be aware of correct format.')
                 break
@@ -141,31 +169,43 @@ class CollectData:
                 start_date = input('Date to past, you want collect data (format year month day): ')
                 break
 
+    
+    def create_csv_file(self, name):
+        with open(name, mode='w', newline='') as csvfile:
+            write = csv.writer(csvfile, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+            write.writerow(self.header + self.sleep_header)
 
-    def fill_temporary_csv(self):
-        if not os.path.isfile('fitbit_data_temp.csv'):
-            self.write_data_to_csv('fitbit_data_temp.csv', 'w', header=True)
-        else:
-            most_recent_date = self.check_most_recent_date_in_collected_data(self._file)
-            last_collected_date = self.check_last_date_in_collected_data('fitbit_data_temp.csv')
-            self.intraday_dates_range = self.intraday_dates(most_recent_date, 
-                                                            last_collected_date)[1:-1]
-            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, 
-                                                                                last_collected_date)[1:-1]
-            self.write_data_to_csv('fitbit_data_temp.csv', 'a', header=False)
+    
+    #### Data updating ####
+    def fill_temporary_csv(self, most_recent_date): # most recent date from self._file
+        temp_file_name = 'fitbit_data_temp.csv'
+
+        if not os.path.isfile(temp_file_name):
+            self.create_csv_file(temp_file_name)
+
+        if os.path.isfile(temp_file_name):
+            if self.check_if_only_header_in_file(temp_file_name): # temp has been created but nothing has been added
+                pass        # dates has been set in control data update yet
+            else:
+                #checking last collected date in temp
+                last_collected_date = self.check_last_date_in_collected_data(temp_file_name)
+                # excluding first date
+                self.intraday_dates_range = self.intraday_dates(most_recent_date,  last_collected_date)[1:-1]
+                self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, last_collected_date)[1:-1]
+        print('dates:', self.intraday_dates_range, self.sleep_and_activity_dates_range)
+        self.write_data_to_csv('fitbit_data_temp.csv', 'a', header=False)
 
 
     def merge_files(self):
         # check if last date in temp_file is one day bigger than first date in self._file
-        print('merging')
+        print('Merging temp file with main data file.')
         recent_date = self.check_most_recent_date_in_collected_data(self._file)
         last_tmp_date = self.check_last_date_in_collected_data('fitbit_data_temp.csv')
         recent_date = recent_date + datetime.timedelta(days=1)
-        print(recent_date, last_tmp_date)
+        print('checking', recent_date, last_tmp_date)
         # create new csv file (updated_file) with underscore difference from self._file
         updated_file = str(self._file).replace('.', '_.')
         if recent_date == last_tmp_date:
-            print('________________')
             with open(updated_file, 'w') as all_data_file:
                 # fill data from temp_file to updated_file
                 with open('fitbit_data_temp.csv', 'r') as new_data:
@@ -177,79 +217,90 @@ class CollectData:
                     for line in old_data:
                         if not line[:4] == 'date':
                             all_data_file.write(line)
-                # remove self._file
-                os.remove(self._file)
-                # rename updated_file to self._file
+            # remove self._file
+            os.remove(self._file)
+            # rename updated_file to self._file
             os.rename(updated_file, self._file)
-            print('__________________')
-            exit()
         else:
-            print('Temp file needs update... After updating finishes restart script please.')
-            self.fill_temporary_csv()
+            print('---Temp file needs update!---')
+            self.fill_temporary_csv(recent_date)
 
 
     def delete_temporary_file(self):
         if os.path.isfile('fitbit_data_temp.csv'):
             print('Deleting temporary file...')
-            #os.remove('fitbit_data_temp.csv')
-
-    
-    def control_data_collection_to_past(self, formated_date_to_past, last_collected_date):
-        if formated_date_to_past < last_collected_date:
-            print('Continuing collecting data...')
-            # timerange
-            self.intraday_dates_range = self.intraday_dates(formated_date_to_past, 
-                                                            last_collected_date)[1:]
-            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(formated_date_to_past, 
-                                                                                last_collected_date)[1:]
-            print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
-            self.write_data_to_csv(self._file, 'a', header=False)
-        elif formated_date_to_past == last_collected_date:
-            print('Data are completely collected to specified date. Checking updating data...')
-        else:
-            print('Error last date in collected data is older than specified date. Change date in date_to_past.txt')
+            os.remove('fitbit_data_temp.csv')
 
 
-    def control_data_updating(self, most_recent_date):
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
-        if most_recent_date < yesterday:
-            print('Updating data. Last collected date: ', most_recent_date)
-            self.intraday_dates_range = self.intraday_dates(most_recent_date, 
-                                                                yesterday)[:-1]
-            self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, 
-                                                                                yesterday)[:-1]
+    def control_data_updating(self, most_recent_date, yesterday_date):
+        # assuming that temp file is not created / only header edgecase
+        self.intraday_dates_range = self.intraday_dates(most_recent_date, yesterday_date)[:-1]
+        self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(most_recent_date, yesterday_date)[:-1]
+        self.fill_temporary_csv(most_recent_date)
+        self.merge_files()
+        self.delete_temporary_file()
+    #######################
 
-            #print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
-            self.fill_temporary_csv()
-            self.merge_files()
-            self.delete_temporary_file()
-            # create temporary csv, fill data, merge files (lazily), delete temporary file
-        elif most_recent_date == yesterday:
-            print('Data are updated to latest (yesterday). Use process.py for visualization.')
-        else:
-            print("Error, most recent date in csv doesn't make sense.")
+
+    #### Collection of data form last collected date to base date ####
+    def control_data_collection_to_past(self, formated_base_date, last_collected_date, include_first_date=0):
+        print('Continuing collecting data...')
+        self.intraday_dates_range = self.intraday_dates(formated_base_date, last_collected_date)[include_first_date:]
+        self.sleep_and_activity_dates_range = self.sleep_and_activity_dates(formated_base_date, last_collected_date)[include_first_date:]
+        print(self.intraday_dates_range, self.sleep_and_activity_dates_range)
+        self.write_data_to_csv(self._file, 'a', header=False)
+    ##################################################################
 
 
     def collection_control_node(self):
-        formated_date_to_past = self.read_date_to_past()
-        print('Collecting data to date to past specified: ', str(formated_date_to_past))
-        if not os.path.isfile(self._file):
-            print('Creating data collection csv file named ', self._file)
-            f = open(self._file, mode='w') # just create it
-            f.close()
+        '''
+        Main control node for:
+            - collecting (creating and filling new file or appending older data to existing file from past)
+            - updating (inserting new recent data to existing file)
+        '''
+        today_date = datetime.datetime.now().date()
+        yesterday_date = today_date - datetime.timedelta(days=1)
+        formated_base_date = self.read_base_date()
+        last_collected_date = yesterday_date
+        most_recent_date = formated_base_date
 
         start_data_mining = input('Do you want to start collecting data? [y/n] ')
         if start_data_mining == 'y':
-            # start collecting - appending
-            last_collected_date = self.check_last_date_in_collected_data(self._file)
-            self.control_data_collection_to_past(formated_date_to_past, last_collected_date)
-            # inserting (or updating)
-            most_recent_date = self.check_most_recent_date_in_collected_data(self._file)
-            self.control_data_updating(most_recent_date)
+            if os.path.isfile(self._file):
+                last_collected_date = self.check_last_date_in_collected_data(self._file) # if none/only header - yesterday
+                most_recent_date = self.check_most_recent_date_in_collected_data(self._file) # if none/only header - base_date
+            else:
+                print('Creating data collection csv file named ', self._file)
+                self.create_csv_file(self._file)
+
+            if formated_base_date == last_collected_date and most_recent_date == yesterday_date:
+                print(f'---Data are completely collected from {last_collected_date} to {most_recent_date}. Use __process.py__.---')
+                exit()
+            elif formated_base_date < last_collected_date and most_recent_date < yesterday_date and formated_base_date != most_recent_date:
+                print(f'---Collecting data from {formated_base_date} to {last_collected_date} and updating data from {most_recent_date} to {yesterday_date}.---')
+                self.control_data_collection_to_past(formated_base_date, last_collected_date, include_first_date=1)
+                self.control_data_updating(most_recent_date, yesterday_date)
+            elif (formated_base_date < last_collected_date and most_recent_date == yesterday_date) \
+                or (formated_base_date < last_collected_date and most_recent_date < yesterday_date):
+                print(f'---Collecting data from {formated_base_date} to {last_collected_date}.---')
+                self.control_data_collection_to_past(formated_base_date, last_collected_date, include_first_date=0)
+            elif formated_base_date == last_collected_date and most_recent_date < yesterday_date:
+                print(f'---Updating data from {most_recent_date} to {yesterday_date}.---')
+                self.control_data_updating(most_recent_date, yesterday_date)
+            elif formated_base_date > last_collected_date and most_recent_date <= yesterday_date:
+                print(f'Error base date is more latest ({formated_base_date}) than last collected date in data ({last_collected_date})')
+                print('You may want to adjust this date in base_date.txt file.')
+                print('Trying at least update data...')
+                self.control_data_updating(most_recent_date, yesterday_date)
+            else:
+                print('Error with dates. \n', \
+                    'Specified date till data will be collected: ' + formated_base_date.strftime('%d.%m.%Y') + '\n', \
+                    'Last collected date: ' + last_collected_date.strftime('%d.%m.%Y') + '\n', \
+                    'Most recent collected date: ' + most_recent_date.strftime('%d.%m.%Y') + '\n', \
+                    'Yesterday date: ' + yesterday_date.strftime('%d.%m.%Y') + '\n')
         else:
+            print('\n Collection stopped. \n')
             exit()
-
-
 
 
     ### Data methods ####
@@ -540,7 +591,7 @@ class CollectData:
 
 
 if __name__ == '__main__':
-    with CollectData('fitbit_stats_5.csv') as col:
-       col.collection_control_node()
+    with CollectData('fitbit_stats_test_4.csv') as col:
+        col.collection_control_node()
 
     
